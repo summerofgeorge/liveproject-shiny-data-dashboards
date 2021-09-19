@@ -1,0 +1,243 @@
+---
+title: "Loading and summarizing the cancer data"
+output: html_notebook
+---
+
+## Setup
+
+In the following, we set up the project and install the dependencies. Since this should only happen *once*, the corresponding code chunks in this section are all marked non-executable. Instead, the accompanying script `requirements.r` can be used to reproducibly set up the project from scratch.
+
+> 1\. Set up a new R project that uses ‘renv’ and initialize a new environment.
+
+```{r eval = FALSE}
+install.packages('renv')
+renv::init()
+```
+
+> 2\. Install the necessary packages for this milestone: ‘maftools’ and ‘dplyr’.
+
+First, since ‘maftools’ isn’t hosted on CRAN, we install ‘BiocManager’:
+
+```{r eval = FALSE}
+renv::install('BiocManager')
+```
+
+Then, we add the Bioconductor repositories and install the packages.
+
+```{r eval = FALSE}
+options(repos = BiocManager::repositories())
+renv::install('maftools', 'dplyr')
+```
+
+
+
+## Load the data
+
+> 3\. Load and explore MAF data for the BRCA tumor that was processed with the “mutect2” pipeline from TCGA.
+
+Let’s load the data provided for this project. Since the data is in R’s data serialization format RDS, we use the function [`readRDS`](https://rdrr.io/r/base/readRDS.html) to read the data:
+
+```{r}
+brca = readRDS('brca.rds')
+```
+
+> Explore this data in R: how is the data structured? What types of variables are we dealing with?
+
+We use ‘dplyr’ for data wrangling. Before looking at the data, we therefore load this package:
+
+```{r message = FALSE}
+library(dplyr)
+```
+
+The first step when dealing with a new dataset is to inspect it. `dplyr::glimpse` is handy for this:
+
+```{r}
+glimpse(brca)
+```
+
+> 4\. Load and explore the matching clinical data for the TCGA-BRCA project.
+
+We proceed as for the previous dataset.
+
+```{r}
+clinical = readRDS('clinical.rds')
+glimpse(clinical)
+```
+
+> 5\. Perform a left join on the two tables by patient ID.
+
+The first 12 characters of the tumor sample barcode correspond to the patient sample barcode. We extract those and subsequently use `left_join` on the two tables:
+
+```{r}
+dataset = brca %>%
+    mutate(bcr_patient_barcode = substr(Tumor_Sample_Barcode, 1L, 12L)) %>%
+    left_join(clinical, by = 'bcr_patient_barcode')
+
+dataset
+```
+
+## Summarize the data
+
+> 6\. Generate a table of the top 10 mutated genes.
+
+As noted, we only want to use *non-silent mutations*, i.e. those that are expected to have a downstream effect on the proteins, and thus at the cell’s health. These are defined as follows:
+
+```{r}
+non_silent_variants = c(
+    'Frame_Shift_Del',
+    'Frame_Shift_Ins',
+    'In_Frame_Del',
+    'In_Frame_Ins', 
+    'Missense_Mutation',
+    'Nonsense_Mutation',
+    'Nonstop_Mutation',
+    'Splice_Site',
+    'Translation_Start_Site'
+)
+```
+
+With this, we subset the dataset by matching against the `Variant_classification` variable. We then count how often each distinct gene occurs using the `dplyr::count` function, and retain the top 10 genes in that list with `dplyr::slice_max`, and lastly order from most to least frequent using the functions `dplyr::arrange` and `dplyr::desc`:
+
+```{r}
+top_10_genes = dataset %>%
+    filter(Variant_Classification %in% non_silent_variants) %>%
+    count(Hugo_Symbol) %>%
+    slice_max(n, n = 10L, with_ties = FALSE) %>%
+    arrange(desc(n))
+
+top_10_genes
+```
+
+> 7\. For each of the top 10 genes, calculate what fraction of samples they appear in.
+
+We have now calculated the top mutated genes. But a given gene can be mutated more than once in a single patient. To assess how prevalent genes’ mutations are in cancer, it’s be more informative to calculate *in how many patients each gene is mutated*.
+
+To do this, we need to generate a list of distinct genes per patient: if gene *A* occurs five times in patient *X*, we only want to count it once. To do this, we use `dplyr::distinct`. Lastly, for ease of interpretability we would like to obtain *fractions* rather than absolute numbers, so we divide by the number of patients.
+
+We will do this for the list of the top 10 genes from above.
+
+```{r}
+number_of_patients = length(unique(dataset$bcr_patient_barcode))
+
+top_10_by_samples = dataset %>%
+    filter(
+        Hugo_Symbol %in% top_10_genes$Hugo_Symbol,
+        Variant_Classification %in% non_silent_variants
+    ) %>%
+    distinct(Hugo_Symbol, bcr_patient_barcode) %>%
+    count(Hugo_Symbol) %>%
+    arrange(desc(n)) %>%
+    mutate(Fraction = n / number_of_patients)
+
+top_10_by_samples %>%
+    # Just for this display, let’s pretty-print the fractions:
+    mutate(Fraction = sprintf('%.2f%%', Fraction * 100))
+```
+
+Before moving on, let’s have a brief look at the top three hits in this table:
+
+*[TP53][]* is a gene that encodes the [tumor protein p53][p53], which is a well-known general tumor suppressor. It is highly effective at killing cells that become damaged, and thus prevents them from becoming cancer precursors. As a consequence, many tumors develop in cells where the *TP53* gene is damaged (and thus can’t suppress the tumor).
+
+Likewise, *[PIK3CA][]*, which encodes the [p110α protein][p110a], is known to be implicated in several types of cancer, and is specifically mutated in one third of breast cancer cases, which matches the number we found (~`r sprintf('%.0f%%', with(top_10_by_samples, Fraction[Hugo_Symbol == 'PIK3CA'] * 100))`).
+
+By contrast, *[TTN][]* is simply a *huge* gene: the total length of its coding sequence is over 100,000 nucleotides (compared to a average length of less than 1000 nucleotides!) and it forms a protein, fittingly called [titin][titin] which, at >1 µm in size, is the largest known naturally occurring molecule. It has no known role in cancer. But if we assume that individual mutations are partially caused by random chance then its sheer size dictates that it is likely to be mutated occasionally.
+
+[TP53]: https://www.ensembl.org/id/ENSG00000141510
+[p53]: https://en.wikipedia.org/wiki/P53
+[PIK3CA]: https://www.ensembl.org/id/ENSG00000121879
+[p110a]: https://en.wikipedia.org/wiki/P110%CE%B1
+[TTN]: https://www.ensembl.org/id/ENSG00000155657
+[titin]: https://en.wikipedia.org/wiki/Titin
+
+> 8\. Generate a MAF summary object from the MAF data and the clinical data and output a *gene summary*. Compare the output with the previous result.
+
+The simple analysis we’ve performed above is so common that they exist as ready-made tools in cancer genomics toolboxes. To make the data usable, it first needs to be put into the required MAF format using the `maftools::read.maf` function.
+
+So we first load the package:
+
+```{r message = FALSE}
+library(maftools)
+```
+
+Performing the `read.maf` operation on our data will cause an error message unless we rename the `bcr_patient_barcode` column in the clinical data:
+
+```{r eval = FALSE}
+maf_summary = read.maf(brca, clinical, isTCGA = TRUE, verbose = FALSE)
+```
+
+```{r echo = FALSE}
+cat(
+    'Error in summarizeMaf(maf = maf, anno = clinicalData, chatty = verbose) :\n',
+    '  Tumor_Sample_Barcode column not found in provided clinical data. Rename column containing sample names to Tumor_Sample_Barcode if necessary.\n',
+    file = stderr(),
+    sep = ''
+)
+```
+
+… luckily the error message tells us to do exactly that: rename the sample barcode column.
+
+```{r}
+clinical_fixed = rename(clinical, Tumor_Sample_Barcode = bcr_patient_barcode)
+maf_summary = read.maf(brca, clinical_fixed, isTCGA = TRUE, verbose = FALSE)
+maf_summary
+```
+
+Now we can run `getGeneSummary` on the MAF summary data:
+
+```{r}
+gene_summary = getGeneSummary(maf_summary)
+gene_summary
+```
+
+This table is similar to the one we computed manually in the last step; but unlike the previous table it doesn’t merely contain the *total* number of mutations per gene; it also contains a detailed tabulation of different variant *types*.
+
+> 9\. Using the MAF summary data and the ‘maftools’ package, plot a summary plot.
+
+With the data restored, we can go ahead and plot it using the `plotmafSummary` function:
+
+```{r warning = FALSE}
+plotmafSummary(maf_summary)
+```
+
+This “summary plot” is really many plots in one. This is ideal for a dashboard, where we want to give a lot of information at a glance:
+
+<dl>
+<dt>Variant Classification</dt>
+<dd>
+Shows how prevalent different *outcomes of a mutation* are on the interpretation of the gene (refer back to the introduction for a brief explanation).
+</dd>
+<dt>Variant Type</dt>
+<dd>Shows how prevalent different *types of mutation* are. As a reminder, the three different types shown here are:
+
+  * Insertion of one or more nucleotides into the genome sequence (“INS”)
+  * Deletion of one or more nucleotides from the genome sequence (“DEL”)
+  * Replacement of a *single* nucleotide by another (“SNP”)
+</dd>
+<dt>SNV Class</dt>
+<dd>
+This zooms in on just the SNVs (= SNPs). It shows the prevalence of individual nucleotide exchanges (e.g. “T>G” reads as “`T` is substituted by `G`”).
+</dd>
+<dt>Variants per sample</dt>
+<dd>
+Shows the variant classification again — but rather than showing total numbers it shows the number of variants across samples (one sample per patient). Each sample is represented by a stacked bar, where the height corresponds to the number of variants in the sample, and the different colors correspond to the different variant classifications.
+</dd>
+<dt>Variant Classification summary</dt>
+<dd>
+This summarizes the data across classifications like the first plot, but instead of plotting the total sum, we plot the distribution across samples, ignoring outliers. For example, it shows that most “Missense_mutation”s (green) occur within the range 0–113, and the median number of missense mutations across samples is just below 37.
+</dd>
+<dt>Top 10 mutated genes</dt>
+<dd>
+This is just the list of the top 10 most frequently mutated genes. The colors of the bars correspond to the different variant classifications for each gene across samples, with the lengths corresponding to how many of these variant classifications are found in each gene — these are the numbers from the `gene_summary` table above. The percentages on the right-hand side of the bars correspond to the fraction of samples each gene is found mutated in (corresponding to the values in the `top_10_by_samples` table).
+</dd>
+</dl>
+
+
+## Epilog
+
+> 10\. If you haven’t already, let ‘renv’ save a snapshot of your project’s package library.
+
+As for the setup, this step is project management, so it shouldn’t be executed as part of the actual analysis script.
+
+```{r eval = FALSE}
+renv::snapshot()
+```
